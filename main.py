@@ -149,6 +149,8 @@ def main():
         print("Staging transfer script and credential payload on file server...", file=sys.stderr)
         sftp = client.open_sftp()
         try:
+            result["source_size_bytes"] = sftp.stat(args.src).st_size
+
             with sftp.open(script_path, "w") as f:
                 f.write(REMOTE_TRANSFER_SCRIPT)
             sftp.chmod(script_path, 0o700)

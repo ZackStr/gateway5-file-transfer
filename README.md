@@ -86,9 +86,15 @@ back automatically.
 {
   "success": true,
   "connected_to_file_server": true,
-  "source_md5": "d41d8cd98f00b204e9800998ecf8427e"
+  "source_md5": "d41d8cd98f00b204e9800998ecf8427e",
+  "source_size_bytes": 1073741824
 }
 ```
+
+`source_size_bytes` comes from an SFTP `stat()` call on the source file
+(essentially free — reuses the SFTP session already open for staging),
+useful for a caller that needs to check free space on the destination
+before/after the transfer without a separate lookup.
 
 If the source file can't be hashed (e.g. it doesn't exist), the script
 fails fast with `success: false` before attempting anything else — no
