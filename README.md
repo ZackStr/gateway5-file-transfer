@@ -43,6 +43,27 @@ work against a generic Linux test target but fail against real hardware.
   and exits 0 for any handled result (success or failure); exit 1 is
   reserved for fatal setup errors.
 
+## Output
+
+```json
+{
+  "success": true,
+  "connected_to_file_server": true,
+  "source_md5": "d41d8cd98f00b204e9800998ecf8427e",
+  "exit_code": 0,
+  "remote_stdout": "{\"status\": \"ok\"}",
+  "remote_stderr": ""
+}
+```
+
+`source_md5` is computed on the file server (`md5sum <src>`) using the
+same SSH session already open for orchestrating the transfer, so a
+caller who needs to verify integrity against the device's own computed
+checksum later doesn't need a separate round-trip to the file server
+just to get this value. If the source file can't be hashed (e.g. it
+doesn't exist), the script fails fast with `success: false` before
+attempting the transfer at all.
+
 ## Requirements
 
 - **Gateway side** (`requirements.txt`): `paramiko`

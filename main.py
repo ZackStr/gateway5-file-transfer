@@ -64,6 +64,17 @@ print(json.dumps(result))
 """
 
 
+def get_source_md5(client, src):
+    stdin, stdout, stderr = client.exec_command(f"md5sum {shlex.quote(src)}")
+    exit_code = stdout.channel.recv_exit_status()
+    out = stdout.read().decode(errors="replace").strip()
+    err = stderr.read().decode(errors="replace").strip()
+    if exit_code != 0:
+        raise RuntimeError(err or out or f"md5sum exited {exit_code}")
+    # md5sum output format: "<hash>  <path>"
+    return out.split()[0]
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fs_host", required=True)
@@ -98,7 +109,16 @@ def main():
         )
         result["connected_to_file_server"] = True
 
-        print("Connected. Starting remote transfer process...", file=sys.stderr)
+        print("Computing source file MD5 on file server...", file=sys.stderr)
+        try:
+            result["source_md5"] = get_source_md5(client, args.src)
+        except Exception as e:
+            result["error"] = f"source_md5_failed: {e}"
+            print(json.dumps(result))
+            client.close()
+            return
+
+        print("Starting remote transfer process...", file=sys.stderr)
         stdin, stdout, stderr = client.exec_command(
             f"python3 -c {shlex.quote(REMOTE_SCRIPT)}"
         )
