@@ -1,15 +1,18 @@
 import argparse
 import json
-import os
 import shlex
 import sys
 
 import paramiko
 
 # IAG python-script contract:
-#   - non-secret inputs arrive as --flag CLI args (decorator schema properties)
-#   - secrets arrive as env vars, injected by IAG from the service's
-#     `secrets:` block — never as CLI args
+#   - all decorator schema properties arrive as --flag CLI args, including
+#     fs_password/device_password here — this service deliberately takes
+#     passwords as dynamic per-call inputs (e.g. a resolved gateway-secret
+#     reference the caller substitutes before invocation) rather than a
+#     static service-level secret binding, trading away "never in argv"
+#     for the ability to pick any registered secret per call without a
+#     re-import. See decorator.json / services.yaml property descriptions.
 #   - always print a single JSON object to stdout; exit 0 for any handled
 #     result (success or failure), exit 1 only for fatal setup errors
 #
@@ -19,8 +22,9 @@ import paramiko
 # path file-server -> device direct, never relayed through the gateway.
 # The device credential is handed to that remote process over its stdin
 # (post-exec, over the already-encrypted channel), never as a command-line
-# argument, so it never appears in a process list or shell history on
-# either host.
+# argument, so it never appears in a process list or shell history on the
+# file server itself, even though it does briefly appear in the gateway's
+# own process list per the trade-off noted above.
 #
 # The remote leg uses the `scp` package (SCP protocol over a paramiko
 # transport), not paramiko's own SFTPClient — Cisco IOS devices generally
@@ -64,8 +68,10 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fs_host", required=True)
     parser.add_argument("--fs_user", required=True)
+    parser.add_argument("--fs_password", required=True)
     parser.add_argument("--device_host", required=True)
     parser.add_argument("--device_user", required=True)
+    parser.add_argument("--device_password", required=True)
     parser.add_argument("--src", required=True)
     parser.add_argument("--dest", required=True)
     return parser.parse_args()
@@ -73,15 +79,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    fs_password = os.environ.get("FS_PASSWORD")
-    device_password = os.environ.get("DEVICE_PASSWORD")
-    if not fs_password or not device_password:
-        print(json.dumps({
-            "success": False,
-            "error": "FS_PASSWORD and DEVICE_PASSWORD env vars required",
-        }))
-        sys.exit(1)
 
     print(f"Connecting to file server {args.fs_user}@{args.fs_host}...", file=sys.stderr)
 
@@ -94,7 +91,7 @@ def main():
         client.connect(
             hostname=args.fs_host,
             username=args.fs_user,
-            password=fs_password,
+            password=args.fs_password,
             timeout=15,
             look_for_keys=False,
             allow_agent=False,
@@ -109,7 +106,7 @@ def main():
         payload = json.dumps({
             "device_host": args.device_host,
             "device_user": args.device_user,
-            "device_password": device_password,
+            "device_password": args.device_password,
             "src": args.src,
             "dest": args.dest,
         })

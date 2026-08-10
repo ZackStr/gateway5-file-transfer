@@ -24,15 +24,24 @@ work against a generic Linux test target but fail against real hardware.
 
 ## IAG service contract
 
-- Non-secret inputs (`fs_host`, `fs_user`, `device_host`, `device_user`,
-  `src`, `dest`) arrive as `--flag` CLI args, per the decorator schema in
-  `services.yaml`.
-- Secrets (`FS_PASSWORD`, `DEVICE_PASSWORD`) arrive as environment
-  variables, injected by IAG from the service's `secrets:` block — never
-  as CLI args.
+- All inputs, including `fs_password`/`device_password`, arrive as
+  `--flag` CLI args per the decorator schema in `services.yaml` — this is
+  the standard IAG python-script contract.
+- **Passwords are dynamic per-call, not a static service-level secret
+  binding.** Callers pass a resolved gateway-secret reference (e.g.
+  `$GATEWAYSECRET_(name)`) as the value of `fs_password`/`device_password`
+  at invocation time, so any registered secret can be used per call
+  without re-importing the service. The trade-off: since these are
+  decorator properties, the resolved plaintext briefly appears in the
+  gateway's own process list (`ps aux`) while the script runs — a
+  deliberate choice favoring per-call flexibility over the stricter
+  "never in argv" property a static `secrets:` env-var binding would give.
+  (The device credential's second hop — from the gateway's SSH session to
+  the file server, into the remote transfer process — still goes over
+  stdin, never argv, on the file server side.)
 - The script always prints one JSON object to stdout (`{"success": ...}`),
   and exits 0 for any handled result (success or failure); exit 1 is
-  reserved for fatal setup errors (e.g. missing required secrets).
+  reserved for fatal setup errors.
 
 ## Requirements
 
@@ -44,19 +53,16 @@ work against a generic Linux test target but fail against real hardware.
 ## Registering with IAG
 
 See `services.yaml` for the decorator, repository, and service
-definition. Import with:
+definition. Import from the repo directly:
 
 ```bash
-iagctl db import services.yaml --validate
-iagctl db import services.yaml
+iagctl db import services.yaml --repository <this-repo-url> --reference main --validate
+iagctl db import services.yaml --repository <this-repo-url> --reference main
 ```
 
-Create the two secrets separately (never commit real values):
-
-```bash
-iagctl create secret gateway5-file-transfer-fs-password --prompt-value
-iagctl create secret gateway5-file-transfer-device-password --prompt-value
-```
+No service-level secrets need to be created — passwords are supplied per
+call (see above), referencing whatever secrets are already registered on
+the target cluster.
 
 ## Notes
 

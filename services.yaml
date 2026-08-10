@@ -7,8 +7,10 @@ decorators:
       required:
         - fs_host
         - fs_user
+        - fs_password
         - device_host
         - device_user
+        - device_password
         - src
         - dest
       properties:
@@ -18,12 +20,30 @@ decorators:
         fs_user:
           type: string
           description: "File server SSH username"
+        fs_password:
+          type: string
+          description: >-
+            File server SSH password. Pass a resolved gateway-secret
+            reference (e.g. $GATEWAYSECRET_(name)) here at call time
+            rather than a literal value — chosen dynamically per call
+            instead of being statically bound in this service's config.
+            Note: this arrives as a CLI arg to the script, so the
+            resolved plaintext is briefly visible in the gateway's
+            process list during execution (deliberate trade-off for
+            per-call flexibility; a static env-var-bound secret would
+            avoid this but locks the service to one fixed secret name).
         device_host:
           type: string
           description: "Destination device hostname or IP"
         device_user:
           type: string
           description: "Destination device SSH/SCP username"
+        device_password:
+          type: string
+          description: >-
+            Destination device SSH/SCP password. Same dynamic
+            gateway-secret-reference pattern and CLI-arg-exposure
+            trade-off as fs_password above.
         src:
           type: string
           description: "Absolute path to the source file on the file server"
@@ -43,7 +63,8 @@ services:
     description: >-
       Pushes a file from a Linux file server directly to a network device
       via SCP (file-server -> device data path, not proxied through the
-      gateway).
+      gateway). Passwords are supplied dynamically per call (see decorator
+      property descriptions), not statically bound as service secrets.
     filename: main.py
     working-directory: "."
     repository: gateway5-file-transfer-repo
@@ -51,12 +72,5 @@ services:
     tags:
       - network
       - file-transfer
-    secrets:
-      - name: rpi
-        type: env
-        target: FS_PASSWORD
-      - name: rpi
-        type: env
-        target: DEVICE_PASSWORD
     runtime:
       req-file: requirements.txt
