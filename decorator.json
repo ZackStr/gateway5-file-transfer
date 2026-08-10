@@ -1,0 +1,40 @@
+{
+  "name": "gateway5-file-transfer-input",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Gateway 5 File Transfer inputs",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["file_server", "device", "src", "dest"],
+    "properties": {
+      "file_server": {
+        "type": "object",
+        "description": "SSH connection details for the file server hosting the source file. Password should be passed as a resolved gateway-secret reference, not a literal value.",
+        "required": ["host", "user", "password"],
+        "properties": {
+          "host": { "type": "string" },
+          "user": { "type": "string" },
+          "password": { "type": "string" }
+        }
+      },
+      "device": {
+        "type": "object",
+        "description": "SSH/SCP connection details for the destination network device. Password should be passed as a resolved gateway-secret reference, not a literal value.",
+        "required": ["host", "user", "password"],
+        "properties": {
+          "host": { "type": "string" },
+          "user": { "type": "string" },
+          "password": { "type": "string" }
+        }
+      },
+      "src": {
+        "type": "string",
+        "description": "Absolute path to the source file on the file server."
+      },
+      "dest": {
+        "type": "string",
+        "description": "Destination path on the device (e.g. flash:image.bin)."
+      }
+    }
+  }
+}
