@@ -1,11 +1,19 @@
 # Gateway 5 File Transfer
 
-An Itential Gateway 5 (IAG5) `python-script` service that pushes a file
-from a Linux file server directly to a network device via SCP — without
-proxying the transfer through the gateway, and without blocking the
-calling workflow for the transfer's full duration.
+Two Itential Gateway 5 (IAG5) `python-script` services for file-server-
+to-device IOS image workflows:
 
-## Why this is async (a hard-learned lesson)
+- **`gateway5-file-transfer`** — pushes a file from a Linux file server
+  directly to a network device via SCP, without proxying through the
+  gateway and without blocking the calling workflow for the transfer's
+  full duration.
+- **`gateway5-list-images`** — lists files in a directory on the file
+  server (name, size, mtime), for populating a binary-selection
+  dropdown.
+
+## gateway5-file-transfer
+
+### Why this is async (a hard-learned lesson)
 
 `GatewayManager.runService` — and the workflow task that calls it —
 **waits for the invoked script to exit** before the task completes. An
@@ -30,7 +38,7 @@ no job-status contract to poll; once it returns, the transfer is running
 in the background and the workflow is expected to check on it via the
 device, not via this service.
 
-## How it works
+### How it works
 
 This script runs **on the gateway**. It:
 
@@ -60,7 +68,7 @@ On completion, the backgrounded process writes a debugging log to
 script file — this is for manual troubleshooting only, nothing reads it
 back automatically.
 
-## IAG service contract
+### IAG service contract
 
 - All inputs, including `fs_password`/`device_password`, arrive as
   `--flag` CLI args per the decorator schema in `services.yaml` — the
@@ -80,7 +88,7 @@ back automatically.
   any handled result (success or failure); exit 1 is reserved for fatal
   setup errors.
 
-## Output
+### Output
 
 ```json
 {
@@ -100,7 +108,7 @@ If the source file can't be hashed (e.g. it doesn't exist), the script
 fails fast with `success: false` before attempting anything else — no
 background process gets launched in that case.
 
-## Requirements
+### Requirements
 
 - **Gateway side** (`requirements.txt`): `paramiko`
 - **File server side** (provisioned separately on whatever host is
@@ -108,22 +116,61 @@ background process gets launched in that case.
   `scp`, plus a working SFTP subsystem (default on most Linux sshd
   configs) and `setsid`/`nohup` (present on virtually all Linux distros)
 
+## gateway5-list-images
+
+Lists files in a directory on the file server via SFTP
+(`listdir_attr()`), returning filename, size, and mtime per entry —
+structured data, no `ls`/regex parsing involved. Runs synchronously
+(a directory listing is fast regardless of size) — no async/background
+handling needed here, unlike the transfer service.
+
+Legacy IAG4 equivalent: ran `ls -l <dir>` locally (IAG4 was co-located
+with the file server) and parsed it line-by-line with a TextFSM template
+that applied no extension filtering, relying on the per-model subfolder
+already containing only relevant files. This version adds an optional
+`extensions` filter since the file server is now a separate host and the
+design calls for results filtered to binaries appropriate for the
+device's model, not just "whatever's in the folder."
+
+### Output
+
+```json
+{
+  "success": true,
+  "connected_to_file_server": true,
+  "images": [
+    {"name": "asr1000-universalk9.16.09.02.SPA.bin", "size_bytes": 529477632, "modified": 1729302480.0}
+  ]
+}
+```
+
+### Inputs
+
+- `fs_host` / `fs_user` / `fs_password` — same connection pattern as
+  `gateway5-file-transfer` (dynamic gateway-secret reference for the
+  password).
+- `directory` — full path to list, e.g. `/data/iosimages/9K`. Mapping a
+  device model to a folder name is the calling workflow's job, not this
+  service's — kept generic/reusable on purpose.
+- `extensions` (optional) — comma-separated list, e.g.
+  `.bin,.SPA.bin,.pkg`. Omit to return every regular file.
+
 ## Registering with IAG
 
-See `services.yaml` for the decorator, repository, and service
-definition. Import from the repo directly:
+See `services.yaml` for both decorators, the repository, and both
+service definitions. Import from the repo directly:
 
 ```bash
 iagctl db import services.yaml --repository <this-repo-url> --reference main --validate
 iagctl db import services.yaml --repository <this-repo-url> --reference main
 ```
 
-No service-level secrets need to be created — passwords are supplied per
-call (see above), referencing whatever secrets are already registered on
-the target cluster.
+No service-level secrets need to be created for either service —
+passwords are supplied per call, referencing whatever secrets are
+already registered on the target cluster.
 
 ## Notes
 
 - General-purpose enough to reuse for any file-server-to-device SCP push
-  scenario, not tied to a specific device vendor beyond the SCP-vs-SFTP
-  note above.
+  or file-listing scenario, not tied to a specific device vendor beyond
+  the SCP-vs-SFTP note above.

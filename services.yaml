@@ -54,6 +54,43 @@ decorators:
           description: "Destination path on the device (e.g. flash:image.bin)"
       additionalProperties: false
 
+  - name: gateway5-list-images
+    schema:
+      $id: gateway5-list-images
+      $schema: https://json-schema.org/draft/202012/schema
+      type: object
+      required:
+        - fs_host
+        - fs_user
+        - fs_password
+        - directory
+      properties:
+        fs_host:
+          type: string
+          description: "File server hostname or IP"
+        fs_user:
+          type: string
+          description: "File server SSH username"
+        fs_password:
+          type: string
+          description: >-
+            File server SSH password. Same dynamic gateway-secret-reference
+            pattern as gateway5-file-transfer.
+        directory:
+          type: string
+          description: >-
+            Full path on the file server to list, e.g.
+            /data/iosimages/9K. Per-model-family subfolder convention
+            (mapping device model to folder name) is the calling
+            workflow's responsibility, not this service's.
+        extensions:
+          type: string
+          description: >-
+            Comma-separated extensions to filter to, e.g.
+            ".bin,.SPA.bin,.pkg". Omit to return every regular file in
+            the directory.
+      additionalProperties: false
+
 repositories:
   - name: gateway5-file-transfer-repo
     url: https://github.com/ZackStr/gateway5-file-transfer.git
@@ -72,6 +109,22 @@ services:
     working-directory: "."
     repository: gateway5-file-transfer-repo
     decorator: gateway5-file-transfer
+    tags:
+      - network
+      - file-transfer
+    runtime:
+      req-file: requirements.txt
+
+  - name: gateway5-list-images
+    type: python-script
+    description: >-
+      Lists files in a directory on the file server via SFTP (filename,
+      size, mtime), optionally filtered by extension — used to populate
+      the binary-selection dropdown after device selection.
+    filename: list_images.py
+    working-directory: "."
+    repository: gateway5-file-transfer-repo
+    decorator: gateway5-list-images
     tags:
       - network
       - file-transfer
