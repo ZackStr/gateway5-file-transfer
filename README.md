@@ -1,47 +1,84 @@
 # Gateway 5 File Transfer
 
 An Itential Gateway 5 (IAG5) `python-script` service that pushes a file
-from a Linux file server directly to a network device via SCP, without
-proxying the transfer through the gateway itself.
+from a Linux file server directly to a network device via SCP — without
+proxying the transfer through the gateway, and without blocking the
+calling workflow for the transfer's full duration.
+
+## Why this is async (a hard-learned lesson)
+
+`GatewayManager.runService` — and the workflow task that calls it —
+**waits for the invoked script to exit** before the task completes. An
+earlier version of this repo ran the device-facing transfer
+synchronously inside the script and waited for it to finish. That
+"worked" for a small test file, but a 1GB file took ~4 minutes and the
+calling workflow task blocked for the entire ~4 minutes; a real IOS
+image would block for hours. That defeats the reason to build this as a
+service in the first place instead of a blocking IAG task.
+
+The fix: this script launches the actual transfer as a genuinely
+**detached background process on the file server** (`setsid nohup ...
+&`, with stdin/stdout/stderr all redirected away from the SSH session so
+it survives after the session closes) and returns immediately, without
+waiting for the transfer to finish.
+
+**Determining completion is not this service's job.** The calling
+workflow does that separately, by polling `dir flash:<filename>` on the
+device itself until the file size stops growing — the same approach
+already used for the SCP-based image transfer design. This service has
+no job-status contract to poll; once it returns, the transfer is running
+in the background and the workflow is expected to check on it via the
+device, not via this service.
 
 ## How it works
 
-This script (`main.py`) runs **on the gateway**. It opens a single SSH
-session to the file server, then executes a small Python process on the
-file server over that session — that remote process performs the actual
-SCP push to the device, so the data path is file-server → device directly.
+This script runs **on the gateway**. It:
 
-The device credential is handed to the remote process over its stdin
-(after the process has already started, via the encrypted SSH channel),
-never as a command-line argument or environment variable on that host —
-so it never appears in a process list or shell history on either host.
+1. Opens one SSH session to the file server.
+2. Computes the source file's MD5 there (`md5sum`) — fast, done before
+   the transfer even begins.
+3. Stages two files on the file server via SFTP: the transfer script
+   itself, and a small JSON credential payload (`chmod 600`, deleted by
+   that script immediately after it reads it — never argv, never a
+   literal in a log). Filenames include a random suffix only to avoid
+   collisions between concurrent transfers on the same file server (e.g.
+   a batch upgrading several devices at once) — it isn't a job id
+   exposed to the caller.
+4. Launches that script as a fully detached background process and
+   returns `{success, source_md5}` without waiting for it.
 
-The device-facing transfer uses the `scp` package (the legacy SCP
-protocol over a paramiko transport), not paramiko's own `SFTPClient`.
-Cisco IOS devices generally only expose the legacy SCP protocol
-(`ip scp server enable`), not an SFTP subsystem — SFTP would silently
-work against a generic Linux test target but fail against real hardware.
+The backgrounded process does the actual device-facing push using the
+`scp` package (SCP protocol over a paramiko transport) — not paramiko's
+own `SFTPClient`. Cisco IOS devices generally only expose the legacy SCP
+protocol (`ip scp server enable`), not an SFTP subsystem, so SFTP would
+work against a generic Linux test target but silently fail against real
+hardware. (SFTP is used here only to stage files on the file server
+itself, which is a normal Linux box — not for the device-facing leg.)
+
+On completion, the backgrounded process writes a debugging log to
+`/tmp/.gw5-log-<suffix>.json` on the file server and deletes its own
+script file — this is for manual troubleshooting only, nothing reads it
+back automatically.
 
 ## IAG service contract
 
 - All inputs, including `fs_password`/`device_password`, arrive as
-  `--flag` CLI args per the decorator schema in `services.yaml` — this is
-  the standard IAG python-script contract.
+  `--flag` CLI args per the decorator schema in `services.yaml` — the
+  standard IAG python-script contract.
 - **Passwords are dynamic per-call, not a static service-level secret
   binding.** Callers pass a resolved gateway-secret reference (e.g.
   `$GATEWAYSECRET_(name)`) as the value of `fs_password`/`device_password`
   at invocation time, so any registered secret can be used per call
-  without re-importing the service. The trade-off: since these are
-  decorator properties, the resolved plaintext briefly appears in the
-  gateway's own process list (`ps aux`) while the script runs — a
-  deliberate choice favoring per-call flexibility over the stricter
-  "never in argv" property a static `secrets:` env-var binding would give.
-  (The device credential's second hop — from the gateway's SSH session to
-  the file server, into the remote transfer process — still goes over
-  stdin, never argv, on the file server side.)
-- The script always prints one JSON object to stdout (`{"success": ...}`),
-  and exits 0 for any handled result (success or failure); exit 1 is
-  reserved for fatal setup errors.
+  without re-importing the service. Trade-off: since these are decorator
+  properties, the resolved plaintext briefly appears in the gateway's own
+  process list (`ps aux`) while the script runs — chosen deliberately for
+  per-call flexibility over the stricter guarantee a static `secrets:`
+  env-var binding would give. (This only applies on the gateway; the
+  device credential's second hop, from the file server into the
+  backgrounded transfer process, goes through a file, never argv there.)
+- The script always prints one JSON object to stdout, and exits 0 for
+  any handled result (success or failure); exit 1 is reserved for fatal
+  setup errors.
 
 ## Output
 
@@ -49,27 +86,21 @@ work against a generic Linux test target but fail against real hardware.
 {
   "success": true,
   "connected_to_file_server": true,
-  "source_md5": "d41d8cd98f00b204e9800998ecf8427e",
-  "exit_code": 0,
-  "remote_stdout": "{\"status\": \"ok\"}",
-  "remote_stderr": ""
+  "source_md5": "d41d8cd98f00b204e9800998ecf8427e"
 }
 ```
 
-`source_md5` is computed on the file server (`md5sum <src>`) using the
-same SSH session already open for orchestrating the transfer, so a
-caller who needs to verify integrity against the device's own computed
-checksum later doesn't need a separate round-trip to the file server
-just to get this value. If the source file can't be hashed (e.g. it
-doesn't exist), the script fails fast with `success: false` before
-attempting the transfer at all.
+If the source file can't be hashed (e.g. it doesn't exist), the script
+fails fast with `success: false` before attempting anything else — no
+background process gets launched in that case.
 
 ## Requirements
 
 - **Gateway side** (`requirements.txt`): `paramiko`
 - **File server side** (provisioned separately on whatever host is
   registered as the file server, not covered by this repo): `paramiko` +
-  `scp`, since the remote leg executes there, not on the gateway
+  `scp`, plus a working SFTP subsystem (default on most Linux sshd
+  configs) and `setsid`/`nohup` (present on virtually all Linux distros)
 
 ## Registering with IAG
 
@@ -87,10 +118,6 @@ the target cluster.
 
 ## Notes
 
-- Invoked asynchronously via `GatewayManager.runService` — the platform
-  returns a `job_id` immediately and the caller polls job status
-  separately; this script runs synchronously start to finish, the
-  platform handles the async contract around it.
 - General-purpose enough to reuse for any file-server-to-device SCP push
   scenario, not tied to a specific device vendor beyond the SCP-vs-SFTP
   note above.

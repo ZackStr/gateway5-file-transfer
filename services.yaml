@@ -43,7 +43,9 @@ decorators:
           description: >-
             Destination device SSH/SCP password. Same dynamic
             gateway-secret-reference pattern and CLI-arg-exposure
-            trade-off as fs_password above.
+            trade-off as fs_password above. Only ever touches the file
+            server as a file (chmod 600, deleted immediately once read
+            by the background transfer process) — never argv there.
         src:
           type: string
           description: "Absolute path to the source file on the file server"
@@ -61,10 +63,11 @@ services:
   - name: gateway5-file-transfer
     type: python-script
     description: >-
-      Pushes a file from a Linux file server directly to a network device
-      via SCP (file-server -> device data path, not proxied through the
-      gateway). Passwords are supplied dynamically per call (see decorator
-      property descriptions), not statically bound as service secrets.
+      Starts a file-server-to-device SCP push as a detached background
+      process on the file server and returns immediately — does not wait
+      for the transfer to complete. The calling workflow determines
+      completion separately by polling `dir flash:<filename>` on the
+      device until the file size stops growing.
     filename: main.py
     working-directory: "."
     repository: gateway5-file-transfer-repo
