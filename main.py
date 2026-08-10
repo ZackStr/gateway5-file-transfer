@@ -1,20 +1,17 @@
-import sys
+import argparse
 import json
+import os
 import shlex
+import sys
 
 import paramiko
 
-# Expected stdin JSON:
-# {
-#   "file_server": {"host": "...", "user": "...", "password": "<resolved secret>"},
-#   "device":      {"host": "...", "user": "...", "password": "<resolved secret>"},
-#   "src": "/home/smarts/IOS/Cisco/9K/testfile.txt",
-#   "dest": "flash:testfile.txt"
-# }
-#
-# file_server/device passwords are expected to already be resolved plaintext
-# by the time this script sees them (the caller passes them in via this
-# cluster's gateway-secret mechanism at the workflow/task level, not here).
+# IAG python-script contract:
+#   - non-secret inputs arrive as --flag CLI args (decorator schema properties)
+#   - secrets arrive as env vars, injected by IAG from the service's
+#     `secrets:` block — never as CLI args
+#   - always print a single JSON object to stdout; exit 0 for any handled
+#     result (success or failure), exit 1 only for fatal setup errors
 #
 # Architecture: this script runs on the GATEWAY. It opens one SSH session to
 # the file server, then runs a small remote Python process ON the file
@@ -63,25 +60,41 @@ print(json.dumps(result))
 """
 
 
-def main():
-    data = json.load(sys.stdin)
-    fs = data["file_server"]
-    device = data["device"]
-    src = data["src"]
-    dest = data["dest"]
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fs_host", required=True)
+    parser.add_argument("--fs_user", required=True)
+    parser.add_argument("--device_host", required=True)
+    parser.add_argument("--device_user", required=True)
+    parser.add_argument("--src", required=True)
+    parser.add_argument("--dest", required=True)
+    return parser.parse_args()
 
-    print(f"Connecting to file server {fs['user']}@{fs['host']}...", file=sys.stderr)
+
+def main():
+    args = parse_args()
+
+    fs_password = os.environ.get("FS_PASSWORD")
+    device_password = os.environ.get("DEVICE_PASSWORD")
+    if not fs_password or not device_password:
+        print(json.dumps({
+            "success": False,
+            "error": "FS_PASSWORD and DEVICE_PASSWORD env vars required",
+        }))
+        sys.exit(1)
+
+    print(f"Connecting to file server {args.fs_user}@{args.fs_host}...", file=sys.stderr)
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    result = {"connected_to_file_server": False}
+    result = {"success": False, "connected_to_file_server": False}
 
     try:
         client.connect(
-            hostname=fs["host"],
-            username=fs["user"],
-            password=fs["password"],
+            hostname=args.fs_host,
+            username=args.fs_user,
+            password=fs_password,
             timeout=15,
             look_for_keys=False,
             allow_agent=False,
@@ -93,15 +106,13 @@ def main():
             f"python3 -c {shlex.quote(REMOTE_SCRIPT)}"
         )
 
-        payload = json.dumps(
-            {
-                "device_host": device["host"],
-                "device_user": device["user"],
-                "device_password": device["password"],
-                "src": src,
-                "dest": dest,
-            }
-        )
+        payload = json.dumps({
+            "device_host": args.device_host,
+            "device_user": args.device_user,
+            "device_password": device_password,
+            "src": args.src,
+            "dest": args.dest,
+        })
         stdin.write(payload)
         stdin.channel.shutdown_write()
 
@@ -112,6 +123,7 @@ def main():
         result["exit_code"] = exit_code
         result["remote_stdout"] = out
         result["remote_stderr"] = err
+        result["success"] = exit_code == 0
 
     except paramiko.AuthenticationException:
         result["error"] = "file_server_authentication_failed"

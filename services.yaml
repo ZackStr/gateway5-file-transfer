@@ -1,0 +1,62 @@
+decorators:
+  - name: gateway5-file-transfer
+    schema:
+      $id: gateway5-file-transfer
+      $schema: https://json-schema.org/draft/202012/schema
+      type: object
+      required:
+        - fs_host
+        - fs_user
+        - device_host
+        - device_user
+        - src
+        - dest
+      properties:
+        fs_host:
+          type: string
+          description: "File server hostname or IP"
+        fs_user:
+          type: string
+          description: "File server SSH username"
+        device_host:
+          type: string
+          description: "Destination device hostname or IP"
+        device_user:
+          type: string
+          description: "Destination device SSH/SCP username"
+        src:
+          type: string
+          description: "Absolute path to the source file on the file server"
+        dest:
+          type: string
+          description: "Destination path on the device (e.g. flash:image.bin)"
+      additionalProperties: false
+
+repositories:
+  - name: gateway5-file-transfer-repo
+    url: https://github.com/ZackStr/gateway5-file-transfer.git
+    reference: main
+
+services:
+  - name: gateway5-file-transfer
+    type: python-script
+    description: >-
+      Pushes a file from a Linux file server directly to a network device
+      via SCP (file-server -> device data path, not proxied through the
+      gateway).
+    filename: main.py
+    working-directory: "."
+    repository: gateway5-file-transfer-repo
+    decorator: gateway5-file-transfer
+    tags:
+      - network
+      - file-transfer
+    secrets:
+      - name: gateway5-file-transfer-fs-password
+        type: env
+        target: FS_PASSWORD
+      - name: gateway5-file-transfer-device-password
+        type: env
+        target: DEVICE_PASSWORD
+    runtime:
+      req-file: requirements.txt
