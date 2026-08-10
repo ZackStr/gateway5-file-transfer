@@ -52,10 +52,10 @@ services:
       - network
       - file-transfer
     secrets:
-      - name: gateway5-file-transfer-fs-password
+      - name: rpi
         type: env
         target: FS_PASSWORD
-      - name: gateway5-file-transfer-device-password
+      - name: rpi
         type: env
         target: DEVICE_PASSWORD
     runtime:
