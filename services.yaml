@@ -126,37 +126,6 @@ decorators:
             ".bin,.SPA.bin,.pkg". Omit to return every regular file found.
       additionalProperties: false
 
-  - name: gateway5-device-command
-    schema:
-      $id: gateway5-device-command
-      $schema: https://json-schema.org/draft/202012/schema
-      type: object
-      required:
-        - device_host
-        - device_user
-        - device_password
-        - command
-      properties:
-        device_host:
-          type: string
-          description: "Device hostname or IP"
-        device_user:
-          type: string
-          description: "Device SSH username"
-        device_password:
-          type: string
-          description: >-
-            Device SSH password. Same dynamic gateway-secret-reference
-            pattern as gateway5-file-transfer.
-        device_type:
-          type: string
-          description: "netmiko device_type, defaults to cisco_ios"
-          default: "cisco_ios"
-        command:
-          type: string
-          description: "Single CLI command to run, e.g. 'dir flash:image.bin' or 'verify /md5 flash:image.bin'"
-      additionalProperties: false
-
 repositories:
   - name: gateway5-file-transfer-repo
     url: https://github.com/ZackStr/gateway5-file-transfer.git
@@ -211,21 +180,5 @@ services:
     tags:
       - network
       - file-transfer
-    runtime:
-      req-file: requirements.txt
-
-  - name: gateway5-device-command
-    type: python-script
-    description: >-
-      Runs a single CLI command against a network device via netmiko
-      (ad hoc host/user/password, no pre-registered gateway inventory
-      required) and returns its raw output.
-    filename: device_command.py
-    working-directory: "."
-    repository: gateway5-file-transfer-repo
-    decorator: gateway5-device-command
-    tags:
-      - network
-      - device-cli
     runtime:
       req-file: requirements.txt

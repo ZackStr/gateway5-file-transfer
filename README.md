@@ -1,6 +1,6 @@
 # Gateway 5 File Transfer
 
-Four Itential Gateway 5 (IAG5) `python-script` services for file-server-
+Three Itential Gateway 5 (IAG5) `python-script` services for file-server-
 to-device IOS image workflows:
 
 - **`gateway5-file-transfer`** — pushes a file from a Linux file server
@@ -13,38 +13,10 @@ to-device IOS image workflows:
 - **`gateway5-list-images-tree`** — recursively lists every file under a
   base path in one call, covering every model's subfolder at once
   instead of one file-server round trip per model.
-- **`gateway5-device-command`** — runs a single CLI command against a
-  network device (ad hoc host/user/password, netmiko-based), for the
-  polling/verification steps around a transfer.
 
-## gateway5-device-command
-
-Runs one CLI command against a device via
-[netmiko](https://github.com/ktbyers/netmiko) and returns its raw
-output. Added because `GatewayManager.sendCommand`/`sendConfig` require
-targeting a pre-registered gateway inventory — this takes ad hoc
-host/user/password instead, consistent with the other three services
-here, and matches the netmiko-based pattern real device drivers on IAG5
-clusters already use (raw paramiko `exec_command` doesn't handle Cisco
-IOS's interactive-shell/paging/enable-mode behavior; netmiko does).
-
-Typical uses in an image-transfer workflow: `dir flash:<filename>`
-(polled until size stops growing) and `verify /md5 flash:<filename>`
-afterward — parse the output with the platform's TemplateBuilder
-(`cisco_ios_dir` template already covers the former).
-
-### Output
-
-```json
-{"success": true, "connected": true, "output": "Directory of flash:/...\n..."}
-```
-
-### Inputs
-
-- `device_host` / `device_user` / `device_password` — same dynamic
-  gateway-secret-reference pattern as the other services.
-- `device_type` (optional) — netmiko device_type, defaults to `cisco_ios`.
-- `command` — the single CLI command to run.
+Device-side CLI (`dir flash:`, `verify /md5`, etc.) is intentionally
+**not** covered by a service in this repo — that's handled by a native
+Itential task against the device instead of a custom script.
 
 ## gateway5-file-transfer
 
@@ -229,8 +201,8 @@ queries.
 
 ## Registering with IAG
 
-See `services.yaml` for all four decorators, the repository, and all
-four service definitions. Import from the repo directly:
+See `services.yaml` for all three decorators, the repository, and all
+three service definitions. Import from the repo directly:
 
 ```bash
 iagctl db import services.yaml --repository <this-repo-url> --reference main --validate
