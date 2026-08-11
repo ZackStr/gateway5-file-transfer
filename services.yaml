@@ -91,6 +91,41 @@ decorators:
             the directory.
       additionalProperties: false
 
+  - name: gateway5-list-images-tree
+    schema:
+      $id: gateway5-list-images-tree
+      $schema: https://json-schema.org/draft/202012/schema
+      type: object
+      required:
+        - fs_host
+        - fs_user
+        - fs_password
+        - base_path
+      properties:
+        fs_host:
+          type: string
+          description: "File server hostname or IP"
+        fs_user:
+          type: string
+          description: "File server SSH username"
+        fs_password:
+          type: string
+          description: >-
+            File server SSH password. Same dynamic gateway-secret-reference
+            pattern as gateway5-file-transfer.
+        base_path:
+          type: string
+          description: >-
+            Root directory to walk recursively, e.g.
+            /home/smarts/IOS/Cisco/ (the binaryPath env var value) — every
+            model-family subfolder underneath it is listed in one call.
+        extensions:
+          type: string
+          description: >-
+            Comma-separated extensions to filter to, e.g.
+            ".bin,.SPA.bin,.pkg". Omit to return every regular file found.
+      additionalProperties: false
+
 repositories:
   - name: gateway5-file-transfer-repo
     url: https://github.com/ZackStr/gateway5-file-transfer.git
@@ -125,6 +160,23 @@ services:
     working-directory: "."
     repository: gateway5-file-transfer-repo
     decorator: gateway5-list-images
+    tags:
+      - network
+      - file-transfer
+    runtime:
+      req-file: requirements.txt
+
+  - name: gateway5-list-images-tree
+    type: python-script
+    description: >-
+      Recursively lists every file under a base path on the file server
+      in one SSH/SFTP session (one call for every model's binaries at
+      once, instead of one call per model subfolder) — mirrors a common
+      legacy ls-tree approach for cutting down on file-server round trips.
+    filename: list_images_tree.py
+    working-directory: "."
+    repository: gateway5-file-transfer-repo
+    decorator: gateway5-list-images-tree
     tags:
       - network
       - file-transfer

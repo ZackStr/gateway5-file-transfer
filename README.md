@@ -1,15 +1,18 @@
 # Gateway 5 File Transfer
 
-Two Itential Gateway 5 (IAG5) `python-script` services for file-server-
+Three Itential Gateway 5 (IAG5) `python-script` services for file-server-
 to-device IOS image workflows:
 
 - **`gateway5-file-transfer`** — pushes a file from a Linux file server
   directly to a network device via SCP, without proxying through the
   gateway and without blocking the calling workflow for the transfer's
   full duration.
-- **`gateway5-list-images`** — lists files in a directory on the file
-  server (name, size, mtime), for populating a binary-selection
+- **`gateway5-list-images`** — lists files in one exact directory on the
+  file server (name, size, mtime), for populating a binary-selection
   dropdown.
+- **`gateway5-list-images-tree`** — recursively lists every file under a
+  base path in one call, covering every model's subfolder at once
+  instead of one file-server round trip per model.
 
 ## gateway5-file-transfer
 
@@ -155,17 +158,54 @@ device's model, not just "whatever's in the folder."
 - `extensions` (optional) — comma-separated list, e.g.
   `.bin,.SPA.bin,.pkg`. Omit to return every regular file.
 
+## gateway5-list-images-tree
+
+Same idea as `gateway5-list-images`, but walks every subfolder under a
+base path recursively in a single SSH/SFTP session, instead of one call
+per model-family folder. Matches a common legacy pattern (an `ls`-tree-
+style listing of the whole image root at once) to cut down on
+file-server round trips — useful when a batch spans multiple device
+models and you'd otherwise need one `gateway5-list-images` call per
+model.
+
+Each result includes which subfolder it came from, so the calling
+workflow can bucket/filter by model without any further file-server
+queries.
+
+### Output
+
+```json
+{
+  "success": true,
+  "connected_to_file_server": true,
+  "images": [
+    {"folder": "9K", "name": "asr1000-universalk9.16.09.02.SPA.bin", "path": "/home/smarts/IOS/Cisco/9K/asr1000-universalk9.16.09.02.SPA.bin", "size_bytes": 529477632, "modified": 1729302480.0},
+    {"folder": "3850", "name": "cat3k_caa-universalk9.16.12.05.SPA.bin", "path": "/home/smarts/IOS/Cisco/3850/cat3k_caa-universalk9.16.12.05.SPA.bin", "size_bytes": 467250627, "modified": 1698500880.0}
+  ]
+}
+```
+
+### Inputs
+
+- `fs_host` / `fs_user` / `fs_password` — same connection pattern as the
+  other two services.
+- `base_path` — root directory to walk, e.g. `/home/smarts/IOS/Cisco/`
+  (the `binaryPath` env var value stored per-region on the
+  `IOSdeviceUpgrade` trigger).
+- `extensions` (optional) — same filtering behavior as
+  `gateway5-list-images`.
+
 ## Registering with IAG
 
-See `services.yaml` for both decorators, the repository, and both
-service definitions. Import from the repo directly:
+See `services.yaml` for all three decorators, the repository, and all
+three service definitions. Import from the repo directly:
 
 ```bash
 iagctl db import services.yaml --repository <this-repo-url> --reference main --validate
 iagctl db import services.yaml --repository <this-repo-url> --reference main
 ```
 
-No service-level secrets need to be created for either service —
+No service-level secrets need to be created for any of them —
 passwords are supplied per call, referencing whatever secrets are
 already registered on the target cluster.
 
