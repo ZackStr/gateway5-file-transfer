@@ -235,6 +235,19 @@ def parse_args():
     return parser.parse_args()
 
 
+def emit(result):
+    # Booleans are deliberately serialized as the strings "true"/"false", not
+    # JSON booleans. The calling workflow's `evaluation` task compares this
+    # service's `success` field directly -- and on this platform, an
+    # `evaluation` operand that resolves to a genuine JSON boolean silently
+    # takes the failure branch (empty `outgoing`, no error surfaced anywhere)
+    # regardless of what it's compared against. String-to-string comparison
+    # is what already works elsewhere in that workflow (size/MD5 checks), so
+    # every top-level boolean here is stringified to match, not just `success`.
+    stringified = {k: ("true" if v is True else "false" if v is False else v) for k, v in result.items()}
+    print(json.dumps(stringified))
+
+
 def main():
     args = parse_args()
 
@@ -249,11 +262,11 @@ def main():
         client = connect_fs(args)
     except paramiko.AuthenticationException:
         result["error"] = "file_server_authentication_failed"
-        print(json.dumps(result))
+        emit(result)
         return
     except Exception as e:
         result["error"] = f"file_server_connection_failed: {type(e).__name__}: {e}"
-        print(json.dumps(result))
+        emit(result)
         return
 
     try:
@@ -325,7 +338,7 @@ def main():
     finally:
         client.close()
 
-    print(json.dumps(result))
+    emit(result)
 
 
 if __name__ == "__main__":
