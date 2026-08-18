@@ -41,6 +41,21 @@ import paramiko
 # target but silently fail against real hardware. The file server itself
 # is assumed to be a normal Linux box with SFTP available (used here only
 # to stage the payload/script files, not for the device-facing transfer).
+#
+# IMPORTANT — fail fast, before forking:
+#   Once the background transfer is launched, this service has no way to
+#   observe whether it succeeds or fails short of the file server's own
+#   debug log (see REMOTE_TRANSFER_SCRIPT's log_path) — there is no
+#   job-status contract, by design (see above). That makes it critical to
+#   catch everything catchable *before* the fork, synchronously, so the
+#   common failure modes (missing source file, source file server unreadable,
+#   device unreachable/wrong credentials) show up immediately in this
+#   script's own JSON result instead of requiring someone to SSH into the
+#   file server and go hunting for a log file after the fact (this bit us
+#   once already: a real device on a different network segment than the
+#   file server timed out mid-transfer with the failure only visible in
+#   that log). Order: source file exists -> source MD5 computable -> file
+#   server can actually SSH to the device -> only then stage + fork.
 
 REMOTE_TRANSFER_SCRIPT = r"""
 import sys, json, os
@@ -87,6 +102,36 @@ except Exception:
     pass
 """
 
+# Run on the FILE SERVER (not the gateway) via exec_command, before the
+# background transfer is forked -- proves the file server can actually
+# reach and authenticate to the device over SSH. Credentials arrive via a
+# payload file (same chmod-600-then-delete pattern as the real transfer
+# payload below), never inline in the command text, so they don't show up
+# in the file server's own process list or shell history.
+DEVICE_PRECHECK_SCRIPT = r"""
+import sys, json
+import paramiko
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+try:
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(
+        hostname=data["device_host"],
+        username=data["device_user"],
+        password=data["device_password"],
+        timeout=10,
+        look_for_keys=False,
+        allow_agent=False,
+    )
+    c.close()
+    print(json.dumps({"ok": True}))
+except Exception as e:
+    print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}))
+"""
+
 
 def connect_fs(args):
     client = paramiko.SSHClient()
@@ -102,14 +147,79 @@ def connect_fs(args):
     return client
 
 
+class TransferPrecheckError(Exception):
+    """Raised for any fail-fast check that must stop us before forking the transfer."""
+
+    def __init__(self, code, detail):
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
+def stat_source(sftp, src):
+    try:
+        return sftp.stat(src)
+    except FileNotFoundError as e:
+        raise TransferPrecheckError("source_file_not_found", f"{src} does not exist on the file server") from e
+    except IOError as e:
+        raise TransferPrecheckError("source_file_not_found", f"{src}: {e}") from e
+
+
 def get_source_md5(client, src):
     stdin, stdout, stderr = client.exec_command(f"md5sum {shlex.quote(src)}")
     exit_code = stdout.channel.recv_exit_status()
     out = stdout.read().decode(errors="replace").strip()
     err = stderr.read().decode(errors="replace").strip()
     if exit_code != 0:
-        raise RuntimeError(err or out or f"md5sum exited {exit_code}")
+        raise TransferPrecheckError("source_md5_failed", err or out or f"md5sum exited {exit_code}")
     return out.split()[0]
+
+
+def precheck_device_ssh(client, args):
+    """Proves the file server can SSH+auth to the device, run from the file
+    server itself (not the gateway) since that's the network path that
+    matters for the actual transfer. Raises TransferPrecheckError on any
+    failure so we never fork a transfer we already know can't connect."""
+    suffix = uuid.uuid4().hex
+    script_path = f"/tmp/.gw5-precheck-{suffix}.py"
+    payload_path = f"/tmp/.gw5-precheck-payload-{suffix}.json"
+
+    sftp = client.open_sftp()
+    try:
+        with sftp.open(script_path, "w") as f:
+            f.write(DEVICE_PRECHECK_SCRIPT)
+        sftp.chmod(script_path, 0o700)
+
+        payload = json.dumps({
+            "device_host": args.device_host,
+            "device_user": args.device_user,
+            "device_password": args.device_password,
+        })
+        with sftp.open(payload_path, "w") as f:
+            f.write(payload)
+        sftp.chmod(payload_path, 0o600)
+    finally:
+        sftp.close()
+
+    try:
+        stdin, stdout, stderr = client.exec_command(f"python3 {script_path} {payload_path}")
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode(errors="replace").strip()
+        err = stderr.read().decode(errors="replace").strip()
+    finally:
+        # Best-effort cleanup regardless of outcome -- these are short-lived,
+        # synchronous helper files, not the payload the background transfer
+        # deletes itself.
+        client.exec_command(f"rm -f {shlex.quote(script_path)} {shlex.quote(payload_path)}")
+
+    if exit_code != 0 or not out:
+        raise TransferPrecheckError("device_ssh_precheck_failed", err or out or f"precheck exited {exit_code}")
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise TransferPrecheckError("device_ssh_precheck_failed", f"unparseable precheck output: {out}") from e
+    if not parsed.get("ok"):
+        raise TransferPrecheckError("device_ssh_precheck_failed", parsed.get("error", "unknown precheck failure"))
 
 
 def parse_args():
@@ -128,14 +238,42 @@ def parse_args():
 def main():
     args = parse_args()
 
-    result = {"success": False, "connected_to_file_server": False}
-    client = connect_fs(args)
+    result = {
+        "success": False,
+        "connected_to_file_server": False,
+        "source_exists": False,
+        "device_reachable": False,
+    }
+
+    try:
+        client = connect_fs(args)
+    except paramiko.AuthenticationException:
+        result["error"] = "file_server_authentication_failed"
+        print(json.dumps(result))
+        return
+    except Exception as e:
+        result["error"] = f"file_server_connection_failed: {type(e).__name__}: {e}"
+        print(json.dumps(result))
+        return
 
     try:
         result["connected_to_file_server"] = True
 
+        print("Checking source file exists on file server...", file=sys.stderr)
+        sftp = client.open_sftp()
+        try:
+            stat = stat_source(sftp, args.src)
+            result["source_exists"] = True
+            result["source_size_bytes"] = stat.st_size
+        finally:
+            sftp.close()
+
         print("Computing source file MD5 on file server...", file=sys.stderr)
         result["source_md5"] = get_source_md5(client, args.src)
+
+        print("Checking file server can SSH to the device...", file=sys.stderr)
+        precheck_device_ssh(client, args)
+        result["device_reachable"] = True
 
         # Random suffix here is only to avoid filename collisions between
         # concurrent transfers on the same file server (e.g. a batch
@@ -149,8 +287,6 @@ def main():
         print("Staging transfer script and credential payload on file server...", file=sys.stderr)
         sftp = client.open_sftp()
         try:
-            result["source_size_bytes"] = sftp.stat(args.src).st_size
-
             with sftp.open(script_path, "w") as f:
                 f.write(REMOTE_TRANSFER_SCRIPT)
             sftp.chmod(script_path, 0o700)
@@ -177,7 +313,11 @@ def main():
         launch_exit_code = stdout.channel.recv_exit_status()
 
         result["success"] = launch_exit_code == 0
+        if not result["success"]:
+            result["error"] = f"background_launch_failed: exit code {launch_exit_code}"
 
+    except TransferPrecheckError as e:
+        result["error"] = f"{e.code}: {e.detail}"
     except paramiko.AuthenticationException:
         result["error"] = "file_server_authentication_failed"
     except Exception as e:
