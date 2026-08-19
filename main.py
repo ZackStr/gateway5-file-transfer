@@ -2,6 +2,7 @@ import argparse
 import json
 import shlex
 import sys
+import time
 import uuid
 
 import paramiko
@@ -318,16 +319,37 @@ def main():
             sftp.close()
 
         print("Launching detached background transfer...", file=sys.stderr)
+        # `setsid` is Linux-only (util-linux) -- absent on macOS entirely, so
+        # a file server that happens to be a Mac would silently never launch
+        # anything: "setsid: command not found" inside a backgrounded `&`
+        # command doesn't surface as a nonzero exit code here, since `&`
+        # itself always "succeeds" at *starting* the background job
+        # regardless of whether the child command that follows it can even
+        # be found. Confirmed 2026-08-19 -- every prior run against this
+        # laptop-as-file-server left orphaned .gw5-payload-*/.gw5-transfer-*
+        # files behind with no .gw5-log-* ever written, meaning the script
+        # never even got as far as reading its own payload. Plain `nohup
+        # ... &` (no setsid) is portable across Linux and macOS and is
+        # sufficient to survive this SSH session closing.
         launch_cmd = (
-            f"setsid nohup python3 {script_path} {payload_path} {log_path} "
-            f"> /dev/null 2>&1 < /dev/null &"
+            f"nohup python3 {script_path} {payload_path} {log_path} "
+            f"> /dev/null 2>&1 < /dev/null & echo $!"
         )
         stdin, stdout, stderr = client.exec_command(launch_cmd)
         launch_exit_code = stdout.channel.recv_exit_status()
+        pid_str = stdout.read().decode(errors="replace").strip()
 
-        result["success"] = launch_exit_code == 0
+        # launch_exit_code can't catch a failure in the backgrounded command
+        # itself (see above) -- explicitly verify the process is actually
+        # alive after a brief moment, so a missing interpreter/dependency on
+        # the file server is caught here instead of silently vanishing.
+        time.sleep(0.5)
+        _, check_stdout, _ = client.exec_command(f"kill -0 {pid_str} 2>/dev/null && echo alive || echo dead")
+        alive = check_stdout.read().decode(errors="replace").strip() == "alive"
+
+        result["success"] = launch_exit_code == 0 and pid_str.isdigit() and alive
         if not result["success"]:
-            result["error"] = f"background_launch_failed: exit code {launch_exit_code}"
+            result["error"] = f"background_launch_failed: pid={pid_str!r} alive={alive} exit_code={launch_exit_code}"
 
     except TransferPrecheckError as e:
         result["error"] = f"{e.code}: {e.detail}"
