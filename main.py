@@ -1,4 +1,5 @@
 import argparse
+import base64
 import json
 import shlex
 import sys
@@ -105,16 +106,22 @@ except Exception:
 
 # Run on the FILE SERVER (not the gateway) via exec_command, before the
 # background transfer is forked -- proves the file server can actually
-# reach and authenticate to the device over SSH. Credentials arrive via a
-# payload file (same chmod-600-then-delete pattern as the real transfer
-# payload below), never inline in the command text, so they don't show up
-# in the file server's own process list or shell history.
+# reach and authenticate to the device over SSH. Streamed directly over the
+# exec_command stdin channel (python3 -) instead of staged as a file first
+# -- this step used to SFTP-write a script + payload file to /tmp, which
+# failed outright (bare paramiko OSError('Failure')) the one time a real
+# file server's /tmp was completely full, well before ever attempting the
+# device connection. Streaming means this check never touches disk at all.
+# The credential payload is base64-embedded directly in the script text
+# (not JSON-embedded in a quoted literal) so arbitrary password content
+# can never break out of the string literal -- base64's alphabet has no
+# quotes/backslashes to escape. Never shows up in the file server's process
+# list or shell history either way, since it's channel data, not argv.
 DEVICE_PRECHECK_SCRIPT = r"""
-import sys, json
+import base64, json
 import paramiko
 
-with open(sys.argv[1]) as f:
-    data = json.load(f)
+data = json.loads(base64.b64decode("__PAYLOAD_B64__").decode())
 
 try:
     c = paramiko.SSHClient()
@@ -181,37 +188,20 @@ def precheck_device_ssh(client, args):
     server itself (not the gateway) since that's the network path that
     matters for the actual transfer. Raises TransferPrecheckError on any
     failure so we never fork a transfer we already know can't connect."""
-    suffix = uuid.uuid4().hex
-    script_path = f"/tmp/.gw5-precheck-{suffix}.py"
-    payload_path = f"/tmp/.gw5-precheck-payload-{suffix}.json"
+    payload = json.dumps({
+        "device_host": args.device_host,
+        "device_user": args.device_user,
+        "device_password": args.device_password,
+    })
+    payload_b64 = base64.b64encode(payload.encode()).decode()
+    script = DEVICE_PRECHECK_SCRIPT.replace("__PAYLOAD_B64__", payload_b64)
 
-    sftp = client.open_sftp()
-    try:
-        with sftp.open(script_path, "w") as f:
-            f.write(DEVICE_PRECHECK_SCRIPT)
-        sftp.chmod(script_path, 0o700)
-
-        payload = json.dumps({
-            "device_host": args.device_host,
-            "device_user": args.device_user,
-            "device_password": args.device_password,
-        })
-        with sftp.open(payload_path, "w") as f:
-            f.write(payload)
-        sftp.chmod(payload_path, 0o600)
-    finally:
-        sftp.close()
-
-    try:
-        stdin, stdout, stderr = client.exec_command(f"python3 {script_path} {payload_path}")
-        exit_code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode(errors="replace").strip()
-        err = stderr.read().decode(errors="replace").strip()
-    finally:
-        # Best-effort cleanup regardless of outcome -- these are short-lived,
-        # synchronous helper files, not the payload the background transfer
-        # deletes itself.
-        client.exec_command(f"rm -f {shlex.quote(script_path)} {shlex.quote(payload_path)}")
+    stdin, stdout, stderr = client.exec_command("python3 -")
+    stdin.write(script)
+    stdin.channel.shutdown_write()
+    exit_code = stdout.channel.recv_exit_status()
+    out = stdout.read().decode(errors="replace").strip()
+    err = stderr.read().decode(errors="replace").strip()
 
     if exit_code != 0 or not out:
         raise TransferPrecheckError("device_ssh_precheck_failed", err or out or f"precheck exited {exit_code}")
@@ -272,6 +262,22 @@ def main():
 
     try:
         result["connected_to_file_server"] = True
+
+        # Best-effort housekeeping: the background transfer script leaves its
+        # own debug log (.gw5-log-*.json) behind indefinitely by design --
+        # nothing polls it back automatically, it's there for a human to
+        # inspect after a failure -- so left alone it accumulates forever on
+        # a shared file server. Sweep anything older than an hour (plenty of
+        # time to have grabbed a real failure's log) on every invocation
+        # instead. Also catches any precheck helper file that failed to
+        # clean up after itself. Never blocks a real transfer on this.
+        try:
+            stdin, stdout, stderr = client.exec_command(
+                "find /tmp -maxdepth 1 -name '.gw5-*' -mmin +60 -delete"
+            )
+            stdout.channel.recv_exit_status()
+        except Exception:
+            pass
 
         print("Checking source file exists on file server...", file=sys.stderr)
         sftp = client.open_sftp()
