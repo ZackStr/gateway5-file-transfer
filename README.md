@@ -117,11 +117,37 @@ background process gets launched in that case.
 
 ### Requirements
 
-- **Gateway side** (`requirements.txt`): `paramiko`
+- **Gateway side** (`requirements.txt`): `paramiko`, `scp`
 - **File server side** (provisioned separately on whatever host is
-  registered as the file server, not covered by this repo): `paramiko` +
-  `scp`, plus a working SFTP subsystem (default on most Linux sshd
-  configs) and `setsid`/`nohup` (present on virtually all Linux distros)
+  registered as the file server, not covered by this repo -- this
+  script only ever installs dependencies into the *gateway's* per-service
+  venv, never onto the file server itself): `paramiko`, plus a working
+  SFTP subsystem (default on most Linux sshd configs) and `nohup`
+  (present on virtually all Linux distros).
+
+  **This is easy to miss when onboarding a new file server** -- the
+  device-reachability precheck runs a small script on the file server's
+  own `python3`, streamed over the SSH session, not the gateway's
+  provisioned environment. Confirmed twice in practice: the original
+  file server had `paramiko` already present, but a second file server
+  onboarded later did not, and failed with `ModuleNotFoundError: No
+  module named 'paramiko'` inside the precheck (visible in the service's
+  `error` field as `device_ssh_precheck_failed: ... ModuleNotFoundError:
+  No module named 'paramiko'`) -- easy to misread as a connectivity
+  problem rather than a missing dependency, since it surfaces through
+  the same `device_reachable: false` field a real timeout would.
+
+  **Before pointing this service at any new file server, verify first:**
+  ```
+  ssh <fs_user>@<fs_host> "python3 -c 'import paramiko; print(paramiko.__file__)'"
+  ```
+  If that fails, install it on the file server (not the gateway):
+  ```
+  ssh <fs_user>@<fs_host> "pip3 install --user paramiko"
+  ```
+  `--user` avoids needing root/sudo on the file server for a service
+  account that likely doesn't have write access to the system
+  site-packages directories.
 
 ## gateway5-list-images
 
