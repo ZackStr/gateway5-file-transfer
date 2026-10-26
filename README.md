@@ -1,7 +1,7 @@
 # Gateway 5 File Transfer
 
-Three Itential Gateway 5 (IAG5) `python-script` services for file-server-
-to-device IOS image workflows:
+Four Itential Gateway 5 (IAG5) `python-script` services for file-server-
+to-device IOS image workflows and interactive device commands:
 
 - **`gateway5-file-transfer`** — pushes a file from a Linux file server
   directly to a network device via SCP, without proxying through the
@@ -14,9 +14,14 @@ to-device IOS image workflows:
   base path in one call, covering every model's subfolder at once
   instead of one file-server round trip per model.
 
-Device-side CLI (`dir flash:`, `verify /md5`, etc.) is intentionally
+- **`gateway5-run-prompt-commands`** — runs CLI commands on a device and
+  answers their interactive prompts (text or a bare Enter), for commands
+  such as `install remove inactive` or `copy` that stop and ask.
+
+Plain device-side CLI (`dir flash:`, `verify /md5`, etc.) is intentionally
 **not** covered by a service in this repo — that's handled by a native
-Itential task against the device instead of a custom script.
+Itential task (`sendCommand`) against the device. The one exception is
+commands that need their prompts answered, which the native task cannot do.
 
 ## gateway5-file-transfer
 
@@ -225,19 +230,83 @@ queries.
 - `extensions` (optional) — same filtering behavior as
   `gateway5-list-images`.
 
+## gateway5-run-prompt-commands
+
+Runs one or more CLI commands over a single SSH session and answers the
+prompts each command raises. The native `sendCommand` task can't do this:
+it sends a command and returns, so a `[y/n]` or `[confirm]` prompt is left
+unanswered until the device times it out.
+
+**No credentials are passed in.** Call it with `GatewayManager.runService`
+and the target `inventory` (`[{"inventory": "<name>", "nodeNames": ["<device>"]}]`).
+Gateway5 pipes the node to the script on stdin (`InventoryInfo` JSON), so
+host, user, password and platform come from Inventory Manager.
+
+### Inputs
+
+One input, `steps`, a JSON array run in order:
+
+```json
+{"steps": [
+  {"command": "install remove inactive",
+   "prompts": [{"expect": "\\[y/n\\]", "respond": "y"}],
+   "timeout": 300,
+   "expect_output": "SUCCESS: install_remove",
+   "fail_on": ["User Rejected", "FAILED"]},
+  {"command": "show version"}
+]}
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | CLI command to send (required) |
+| `prompts[].expect` | Regex matched against the **end** of the output produced since the last answer |
+| `prompts[].respond` | Text to send. `""` presses Enter with nothing typed (required, so an Enter is always deliberate) |
+| `prompts[].optional` | `true` if the prompt may not appear |
+| `prompts[].sensitive` | `true` to hide the response text in the result |
+| `timeout` | Seconds allowed for the step (default 120) |
+| `fail_on` | Optional. Extra regexes that fail the step when found in its output. A line starting with `%` (Invalid/Unknown/Ambiguous/Incomplete/Error) always fails it |
+| `expect_output` | Optional. A regex, or a list that must all match, that the output has to contain once the device prompt returns; if not, the step fails. Omit for no outcome check |
+
+### Behaviour
+
+- Prompts are matched **in any order** and each is answered at most once.
+- Only prompts listed for that step are ever answered. If the device stops
+  at anything else, the step times out and **nothing is sent**.
+- A step ends when the device's normal CLI prompt returns. A required
+  prompt that never appeared fails the step.
+- `fail_on` and `expect_output` are both optional and independent: a step
+  runs the same with either, both or neither. `fail_on` says what must NOT
+  be in the output, `expect_output` says what must be.
+- The first failed step stops the run; later steps are `skipped`.
+- After a failed step the connection is dropped without sending anything.
+  A normal disconnect types `exit`, and some prompts (a `delete`'s
+  `[confirm]`) accept that as an answer — confirmed on a Catalyst 8000V,
+  where it deleted the file.
+- Don't use a catch-all expect (e.g. `\\?`) with an empty response: it would
+  also confirm prompts such as `Proceed with reload? [confirm]`.
+
+### Output
+
+One JSON object: `success`, `device`, `elapsed`, and per step `command`,
+`status` (`success`/`failed`/`skipped`), `error`, `output`,
+`prompts_answered` (`expect`, `sent`) and `elapsed`. Exit code is 0 only
+when every step succeeded.
+
 ## Registering with IAG
 
-See `services.yaml` for all three decorators, the repository, and all
-three service definitions. Import from the repo directly:
+See `services.yaml` for all four decorators, the repository, and all
+four service definitions. Import from the repo directly:
 
 ```bash
 iagctl db import services.yaml --repository <this-repo-url> --reference main --validate
 iagctl db import services.yaml --repository <this-repo-url> --reference main
 ```
 
-No service-level secrets need to be created for any of them —
-passwords are supplied per call, referencing whatever secrets are
-already registered on the target cluster.
+No service-level secrets need to be created for any of them. The file
+services take passwords per call, referencing secrets already registered
+on the target cluster; `gateway5-run-prompt-commands` takes none and gets
+its credentials from the targeted inventory node.
 
 ## Notes
 

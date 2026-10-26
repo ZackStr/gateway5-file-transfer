@@ -126,6 +126,76 @@ decorators:
             ".bin,.SPA.bin,.pkg". Omit to return every regular file found.
       additionalProperties: false
 
+  - name: gateway5-run-prompt-commands
+    schema:
+      $id: gateway5-run-prompt-commands
+      $schema: https://json-schema.org/draft/202012/schema
+      type: object
+      required:
+        - steps
+      properties:
+        steps:
+          type: array
+          minItems: 1
+          description: >-
+            Ordered steps, run over one SSH session. The device and its
+            credentials come from the targeted Inventory Manager node,
+            not from an input.
+          items:
+            type: object
+            required:
+              - command
+            properties:
+              command:
+                type: string
+                description: "CLI command to send"
+              prompts:
+                type: array
+                description: >-
+                  Prompts this command may raise. Matched in any order,
+                  each answered at most once; anything not listed is
+                  never answered.
+                items:
+                  type: object
+                  required:
+                    - expect
+                    - respond
+                  properties:
+                    expect:
+                      type: string
+                      description: "Regex matched against the end of the output since the last answer"
+                    respond:
+                      type: string
+                      description: 'Text to send. "" presses Enter with nothing typed.'
+                    optional:
+                      type: boolean
+                      description: "True if the prompt may not appear"
+                    sensitive:
+                      type: boolean
+                      description: "True to hide the response text in the result"
+                  additionalProperties: false
+              timeout:
+                type: number
+                description: "Seconds allowed for this step (default 120)"
+              fail_on:
+                type: array
+                description: "Extra regexes that fail the step when found in its output"
+                items:
+                  type: string
+              expect_output:
+                description: >-
+                  Optional outcome check: a regex, or a list of regexes that
+                  must all match, which the step's output has to contain. If
+                  it does not, the step fails and the run stops. Omit for no
+                  check.
+                oneOf:
+                  - type: string
+                  - type: array
+                    items:
+                      type: string
+            additionalProperties: false
+      additionalProperties: false
+
 repositories:
   - name: gateway5-file-transfer-repo
     url: https://github.com/ZackStr/gateway5-file-transfer.git
@@ -180,5 +250,21 @@ services:
     tags:
       - network
       - file-transfer
+    runtime:
+      req-file: requirements.txt
+
+  - name: gateway5-run-prompt-commands
+    type: python-script
+    description: >-
+      Runs CLI commands on a device and answers their interactive
+      prompts (including a bare Enter). The device and credentials come
+      from the targeted inventory node, so no secrets are passed in.
+    filename: run_prompt_commands.py
+    working-directory: "."
+    repository: gateway5-file-transfer-repo
+    decorator: gateway5-run-prompt-commands
+    tags:
+      - network
+      - device-cli
     runtime:
       req-file: requirements.txt
