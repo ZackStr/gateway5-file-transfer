@@ -42,8 +42,17 @@ Behaviour:
   * The step is finished when the device's normal CLI prompt returns. A
     required prompt that never appeared fails the step.
   * The first failed step stops the run; later steps are reported as skipped.
+  * The device prompt is recognised from the hostname learned at connect. If that
+    does not match (slow devices can yield a truncated prompt), a prompt-shaped last
+    line that has been idle for 1.5 s also ends the step ("prompt_matched": "generic").
+    A step that still times out reports "diagnostics" (the regex tried and the raw tail).
+  * Netmiko options on the inventory node (global_delay_factor, banner_timeout,
+    auth_timeout, conn_timeout/timeout) are honoured; fast_cli is off when a delay
+    factor above 1 is set.
 
 Result: one JSON object on stdout. Exit code 0 only when every step succeeded.
+"device_prompt" is the hostname prompt netmiko learned at connect (the value the
+end-of-command check is built from), returned on every run to help diagnose prompt issues.
 """
 
 import argparse
@@ -57,6 +66,12 @@ from netmiko import ConnectHandler
 DEFAULT_STEP_TIMEOUT = 120
 POLL = 0.2
 ERROR_LINE = re.compile(r"^\s*%\s*(Invalid|Unknown|Ambiguous|Incomplete|Error)", re.I | re.M)
+# Fallback end-of-command check that does not depend on the hostname netmiko learned at
+# connect: the output's last line is a single token ending in # or > (optionally with a
+# "(config)" mode suffix). Only trusted after the output has been idle for GENERIC_IDLE
+# seconds, so a pause mid-output cannot end a step early.
+GENERIC_PROMPT = re.compile(r"(?:^|\n)[^\s#>]+(?:\([^)\n]*\))?[#>][ \t]*\Z")
+GENERIC_IDLE = 1.5
 
 
 def _read_inventory_node():
@@ -82,16 +97,26 @@ def _connection(node, platform_override):
     if missing:
         raise SystemExit("inventory node is missing: " + ", ".join(missing))
     opts = (attrs.get("itential_driver_options") or {}).get("netmiko") or {}
-    return dict(
+    kwargs = dict(
         device_type=platform_override or opts.get("device_type")
         or attrs.get("itential_platform") or "cisco_ios",
         host=host, username=user, password=password,
         port=int(opts.get("port") or attrs.get("itential_port") or 22),
-        conn_timeout=int(opts.get("timeout") or 15),
+        conn_timeout=int(opts.get("conn_timeout") or opts.get("timeout") or 15),
         # legacy ssh-rsa host keys are disabled by default in paramiko 3.3+
         disabled_algorithms={"pubkeys": []},
         fast_cli=True,
-    ), ((node or {}).get("name") or host)
+    )
+    # Honour the node's own pacing options (set for slow devices such as the 3850).
+    # fast_cli shortens netmiko's read delays, so turn it off when a delay is requested.
+    for key in ("banner_timeout", "auth_timeout"):
+        if opts.get(key):
+            kwargs[key] = int(opts[key])
+    gdf = opts.get("global_delay_factor")
+    if gdf and float(gdf) > 1:
+        kwargs["global_delay_factor"] = float(gdf)
+        kwargs["fast_cli"] = False
+    return kwargs, ((node or {}).get("name") or host)
 
 
 def _validate(steps):
@@ -146,10 +171,12 @@ def _run_step(conn, step, prompt_rx):
     conn.clear_buffer()
     conn.write_channel(step["command"] + "\n")
     buf, pos = "", 0
+    last_change, generic = time.monotonic(), False
     while True:
         chunk = conn.read_channel()
         if chunk:
             buf += chunk.replace("\r", "")
+            last_change = time.monotonic()
         seg = buf[pos:]
         matched = next((p for p in remaining if p["rx"].search(seg[-4000:])), None)
         if matched:
@@ -162,14 +189,21 @@ def _run_step(conn, step, prompt_rx):
             continue
         if prompt_rx.search(seg[-300:]):
             break
+        if (time.monotonic() - last_change >= GENERIC_IDLE
+                and GENERIC_PROMPT.search(seg[-300:])):
+            generic = True
+            break
         if time.monotonic() - start > step["timeout"]:
             res["output"] = buf.strip()
+            res["diagnostics"] = {"prompt_regex": prompt_rx.pattern, "tail": repr(buf[-160:])}
             res["error"] = (f"timed out after {step['timeout']:.0f}s without the device prompt "
                             "returning; nothing further was sent")
             res["elapsed"] = round(time.monotonic() - start, 3)
             return res
         time.sleep(POLL)
-    out = prompt_rx.sub("", buf).strip()
+    out = (GENERIC_PROMPT if generic else prompt_rx).sub("", buf).strip()
+    if generic:
+        res["prompt_matched"] = "generic"
     res["output"] = out
     res["elapsed"] = round(time.monotonic() - start, 3)
     missing = [p["expect"] for p in remaining if not p["optional"]]
@@ -241,8 +275,8 @@ def main():
     finally:
         _close(dev, clean=not failed)
     ok = all(r["status"] == "success" for r in results)
-    print(json.dumps({"success": ok, "device": name, "steps": results,
-                      "elapsed": round(time.monotonic() - t0, 3)}))
+    print(json.dumps({"success": ok, "device": name, "device_prompt": dev.base_prompt,
+                      "steps": results, "elapsed": round(time.monotonic() - t0, 3)}))
     return 0 if ok else 1
 
 

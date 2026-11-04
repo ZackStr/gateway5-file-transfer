@@ -275,6 +275,16 @@ One input, `steps`, a JSON array run in order:
   at anything else, the step times out and **nothing is sent**.
 - A step ends when the device's normal CLI prompt returns. A required
   prompt that never appeared fails the step.
+- The prompt is recognised from the hostname netmiko learned at connect
+  (`device_prompt` in the result). If that does not match the prompt the
+  device actually shows (seen on a slow Catalyst 3850), a prompt-shaped last
+  line (`host#`, `host>`, `host(config)#`) that has been idle for 1.5 s also
+  ends the step, and the step carries `"prompt_matched": "generic"`.
+- Netmiko options on the inventory node's `itential_driver_options.netmiko`
+  are honoured: `global_delay_factor` (above 1 also turns `fast_cli` off),
+  `banner_timeout`, `auth_timeout` and `conn_timeout` (then `timeout`).
+- A step that times out reports `diagnostics`: the end-of-command regex that
+  was tried and the raw last 160 characters of output.
 - `fail_on` and `expect_output` are both optional and independent: a step
   runs the same with either, both or neither. `fail_on` says what must NOT
   be in the output, `expect_output` says what must be.
@@ -288,9 +298,11 @@ One input, `steps`, a JSON array run in order:
 
 ### Output
 
-One JSON object: `success`, `device`, `elapsed`, and per step `command`,
+One JSON object: `success`, `device`, `device_prompt` (the hostname prompt
+learned at connect), `elapsed`, and per step `command`,
 `status` (`success`/`failed`/`skipped`), `error`, `output`,
-`prompts_answered` (`expect`, `sent`) and `elapsed`. Exit code is 0 only
+`prompts_answered` (`expect`, `sent`) and `elapsed`, plus `prompt_matched`
+(only when generic) and `diagnostics` (only on a timeout). Exit code is 0 only
 when every step succeeded.
 
 ## Registering with IAG
